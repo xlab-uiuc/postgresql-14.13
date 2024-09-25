@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdio.h>
 #include <unistd.h>
 #include <sys/socket.h>
 #ifdef HAVE_SYS_SELECT_H
@@ -81,6 +82,8 @@
 #include "utils/timeout.h"
 #include "utils/timestamp.h"
 #include "utils/varlena.h"
+
+#include "executor/spi.h"
 
 /* ----------------
  *		global variables
@@ -210,6 +213,15 @@ static void log_disconnections(int code, Datum arg);
 static void enable_statement_timeout(void);
 static void disable_statement_timeout(void);
 
+/**
+ *	for standalone application only
+ * */
+
+static unsigned long key_max = 15000000UL;
+static int running_insertion_ratio = 0;
+static unsigned long n_running_phase_ops = 10UL;
+static bool perform_insertions = false;
+static bool perform_reads = false;
 
 /* ----------------------------------------------------------------
  *		routines to obtain user input
@@ -3798,7 +3810,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR")) != -1)
 	{
 		switch (flag)
 		{
@@ -3930,6 +3942,12 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				SetConfigOption("post_auth_delay", optarg, ctx, gucsource);
 				break;
 
+			case 'I':
+				perform_insertions = true;
+				break;
+			case 'R':
+				perform_reads = true;
+				break;
 			case 'c':
 			case '-':
 				{
@@ -4000,6 +4018,181 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	optreset = 1;				/* some systems need this too */
 #endif
 }
+
+// #define key_ 10
+#define BENCHMARK_VALUE_SIZE (1024)
+#define VALUE_ID_LENGTH 18
+
+static void PerformInsertions()
+{
+    int ret;
+    char *command;
+
+    /* Begin transaction */
+    StartTransactionCommand();
+
+	if (SPI_connect() != SPI_OK_CONNECT)
+    {
+        elog(ERROR, "SPI_connect failed");
+    }
+
+	printf("[PerformInsertions] SPI connected\n");
+	fflush(stdout);
+
+	PushActiveSnapshot(GetTransactionSnapshot());
+	
+	command = "DROP TABLE IF EXISTS test_table;";
+	ret = SPI_exec(command, 0);
+	if (ret != SPI_OK_UTILITY)
+	{
+		elog(ERROR, "Table drop failed: %d", ret);
+	}
+
+	printf("[PerformInsertions] Drop table if exits\n");
+
+    /* Create table if it doesn't exist */
+    command = "CREATE TABLE IF NOT EXISTS test_table (id SERIAL PRIMARY KEY, key_str TEXT);";
+    ret = SPI_exec(command, 0);
+    if (ret != SPI_OK_UTILITY)
+    {
+        elog(ERROR, "Table creation failed: %d", ret);
+    }
+
+	printf("[PerformInsertions] create table\n");
+
+    /* Insert 1,000 keys */
+    for (size_t i = 1; i <= key_max; i++)
+    {
+		
+		if ((i % (100000)) == 0) {
+			printf("Insert %lu *100k / %lu *100k\n", i / 100000, key_max / 100000);
+			fflush(stdout);
+		}
+
+        char insert_cmd[BENCHMARK_VALUE_SIZE + 64];
+		char value [BENCHMARK_VALUE_SIZE + 1];
+		
+		memset(value, 'a', BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH);
+		snprintf(&value[BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH], VALUE_ID_LENGTH + 1, "0x%016lx", i);
+
+        snprintf(insert_cmd, sizeof(insert_cmd), "INSERT INTO test_table (key_str) VALUES ('%s');", value);
+
+        ret = SPI_exec(insert_cmd, 0);
+        if (ret != SPI_OK_INSERT)
+        {
+            elog(ERROR, "Insertion failed at key %ld: %d", i, ret);
+        }
+    }
+
+	/* Pop the active snapshot */
+    PopActiveSnapshot();
+
+	/* Finish SPI session */
+    if (SPI_finish() != SPI_OK_FINISH)
+    {
+        elog(WARNING, "SPI_finish failed in PerformInsertions");
+    }
+
+    /* Commit transaction */
+    CommitTransactionCommand();
+}
+
+
+#define SELECT_COMMAND_MAX_SIZE 128
+
+#define key_col 1
+#define key_str_col 2
+
+static void PerformReads(unsigned long n_reads)
+{
+    int ret;
+    SPITupleTable *tuptable;
+    TupleDesc tupdesc;
+    Snapshot snapshot;
+
+    /* Begin transaction */
+    StartTransactionCommand();
+	
+	if (SPI_connect() != SPI_OK_CONNECT)
+    {
+        elog(ERROR, "SPI_connect failed");
+    }
+
+	printf("[PerformInsertions] SPI connected\n");
+	fflush(stdout);
+
+    /* Acquire a snapshot */
+    snapshot = GetTransactionSnapshot();
+
+    /* Push the active snapshot */
+    PushActiveSnapshot(snapshot);
+
+    for (unsigned long j = 0; j < n_reads; j++)
+    {
+		
+		char select_cmd[SELECT_COMMAND_MAX_SIZE];
+
+		if ((j % (1000000)) == 0) {
+			printf("Read %ld M / %ld M\n", j / 1000000, n_reads / 1000000);
+			fflush(stdout);
+		}
+
+		size_t i = (size_t)rand() % (key_max);
+
+		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", i);
+
+		// printf("select_cmd=%s\n", select_cmd);
+        ret = SPI_execute(select_cmd, true, 0);
+        if (ret != SPI_OK_SELECT)
+        {
+            elog(ERROR, "Select failed on iteration %ld: %d", j, ret);
+        }
+
+        tuptable = SPI_tuptable;
+        tupdesc = tuptable->tupdesc;
+
+        /* Process each row */
+        for (uint64 i = 0; i < SPI_processed; i++)
+        {
+            HeapTuple tuple = tuptable->vals[i];
+            Datum id_datatum;
+			Datum key_str_datum;
+            bool isnull_key, isnull_key_str;
+            volatile int32 id_value;
+			volatile char * key_str_value;
+
+            id_datatum = SPI_getbinval(tuple, tupdesc, 1, &isnull_key);
+            if (!isnull_key)
+            {
+				// printf("id_datatum: %lx\n", id_datatum);
+                id_value = DatumGetInt32(id_datatum);
+                /* Process id_value if needed */
+            }
+
+			key_str_value = SPI_getvalue(tuple, tupdesc, 2);
+			// printf("key_str_value: %p\n", key_str_value);
+
+			// if (!isnull_key && key_str_value) {
+			// 	printf("iteration %d key %d key_str_value: %s\n", j, id_value, key_str_value);
+			// }
+		}
+
+		SPI_freetuptable(tuptable);
+	}
+
+    /* Pop the active snapshot */
+    PopActiveSnapshot();
+
+	/* Finish SPI session */
+    if (SPI_finish() != SPI_OK_FINISH)
+    {
+        elog(WARNING, "SPI_finish failed in PerformReads");
+    }
+
+    /* Commit transaction */
+    CommitTransactionCommand();
+}
+
 
 
 /* ----------------------------------------------------------------
@@ -4254,6 +4447,28 @@ PostgresMain(int argc, char *argv[],
 	if (!IsUnderPostmaster)
 		PgStartTime = GetCurrentTimestamp();
 
+	printf("main thread begin\n");
+	
+	// if (SPI_connect() != SPI_OK_CONNECT)
+    // {
+    //     elog(ERROR, "SPI_connect failed");
+    // }
+
+	// printf("SPI connected\n");
+	// fflush(stdout);
+
+
+	if (perform_insertions)
+		PerformInsertions();
+	
+	if (perform_reads)
+		PerformReads(10000000);
+
+	// SPI_finish();
+
+
+	// while (1);
+	
 	/*
 	 * POSTGRES main processing loop begins here
 	 *
