@@ -218,8 +218,8 @@ static void disable_statement_timeout(void);
  * */
 
 static unsigned long key_max = 15000000UL;
-static int running_insertion_ratio = 0;
-static unsigned long n_running_phase_ops = 10UL;
+// static int running_insertion_ratio = 0;
+static unsigned long n_loading_read = 15000000UL;
 static bool perform_insertions = false;
 static bool perform_reads = false;
 
@@ -3810,7 +3810,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:")) != -1)
 	{
 		switch (flag)
 		{
@@ -3947,6 +3947,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				break;
 			case 'R':
 				perform_reads = true;
+				n_loading_read = atoi(optarg);
 				break;
 			case 'c':
 			case '-':
@@ -4063,14 +4064,13 @@ static void PerformInsertions()
     /* Insert 1,000 keys */
     for (size_t i = 1; i <= key_max; i++)
     {
-		
+		char insert_cmd[BENCHMARK_VALUE_SIZE + 64];
+		char value [BENCHMARK_VALUE_SIZE + 1];
+
 		if ((i % (100000)) == 0) {
 			printf("Insert %lu *100k / %lu *100k\n", i / 100000, key_max / 100000);
 			fflush(stdout);
 		}
-
-        char insert_cmd[BENCHMARK_VALUE_SIZE + 64];
-		char value [BENCHMARK_VALUE_SIZE + 1];
 		
 		memset(value, 'a', BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH);
 		snprintf(&value[BENCHMARK_VALUE_SIZE - VALUE_ID_LENGTH], VALUE_ID_LENGTH + 1, "0x%016lx", i);
@@ -4103,31 +4103,12 @@ static void PerformInsertions()
 #define key_col 1
 #define key_str_col 2
 
-static void PerformReads(unsigned long n_reads)
-{
-    int ret;
+static void __perform_reads(unsigned long n_reads) {
+	int ret;
     SPITupleTable *tuptable;
     TupleDesc tupdesc;
-    Snapshot snapshot;
 
-    /* Begin transaction */
-    StartTransactionCommand();
-	
-	if (SPI_connect() != SPI_OK_CONNECT)
-    {
-        elog(ERROR, "SPI_connect failed");
-    }
-
-	printf("[PerformInsertions] SPI connected\n");
-	fflush(stdout);
-
-    /* Acquire a snapshot */
-    snapshot = GetTransactionSnapshot();
-
-    /* Push the active snapshot */
-    PushActiveSnapshot(snapshot);
-
-    for (unsigned long j = 0; j < n_reads; j++)
+	for (unsigned long j = 0; j < n_reads; j++)
     {
 		
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
@@ -4179,6 +4160,39 @@ static void PerformReads(unsigned long n_reads)
 
 		SPI_freetuptable(tuptable);
 	}
+}
+
+
+static void PerformReads(unsigned long n_reads_loading)
+{
+    Snapshot snapshot;
+
+    /* Begin transaction */
+    StartTransactionCommand();
+	
+	if (SPI_connect() != SPI_OK_CONNECT)
+    {
+        elog(ERROR, "SPI_connect failed");
+    }
+
+	printf("[PerformInsertions] SPI connected\n");
+	fflush(stdout);
+
+    /* Acquire a snapshot */
+    snapshot = GetTransactionSnapshot();
+
+    /* Push the active snapshot */
+    PushActiveSnapshot(snapshot);
+
+	/* loading phase */
+	__perform_reads(n_reads_loading);
+
+	__asm__ volatile ("xchgq %r10, %r10");
+
+	/* running phase */
+	__perform_reads(n_reads_loading / 6);
+	__asm__ volatile ("xchgq %r11, %r11");
+    
 
     /* Pop the active snapshot */
     PopActiveSnapshot();
@@ -4448,26 +4462,12 @@ PostgresMain(int argc, char *argv[],
 		PgStartTime = GetCurrentTimestamp();
 
 	printf("main thread begin\n");
-	
-	// if (SPI_connect() != SPI_OK_CONNECT)
-    // {
-    //     elog(ERROR, "SPI_connect failed");
-    // }
-
-	// printf("SPI connected\n");
-	// fflush(stdout);
-
 
 	if (perform_insertions)
 		PerformInsertions();
 	
 	if (perform_reads)
-		PerformReads(10000000);
-
-	// SPI_finish();
-
-
-	// while (1);
+		PerformReads(n_loading_read);
 	
 	/*
 	 * POSTGRES main processing loop begins here
