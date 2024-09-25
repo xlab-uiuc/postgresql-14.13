@@ -4116,8 +4116,8 @@ static void __perform_reads(unsigned long n_reads) {
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
 		size_t i = (size_t)rand() % (key_max);
 
-		if ((j % (1000000)) == 0) {
-			printf("Read %ld M / %ld M\n", j / 1000000, n_reads / 1000000);
+		if ((j % (1000)) == 0) {
+			printf("Read %ld M / %ld M\n", j / 1000, n_reads / 1000);
 			fflush(stdout);
 		}
 
