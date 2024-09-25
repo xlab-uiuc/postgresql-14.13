@@ -4103,6 +4103,8 @@ static void PerformInsertions()
 #define key_col 1
 #define key_str_col 2
 
+#define UNUSED(x) (void)(x)
+
 static void __perform_reads(unsigned long n_reads) {
 	int ret;
     SPITupleTable *tuptable;
@@ -4112,13 +4114,14 @@ static void __perform_reads(unsigned long n_reads) {
     {
 		
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
+		size_t i = (size_t)rand() % (key_max);
 
 		if ((j % (1000000)) == 0) {
 			printf("Read %ld M / %ld M\n", j / 1000000, n_reads / 1000000);
 			fflush(stdout);
 		}
 
-		size_t i = (size_t)rand() % (key_max);
+		
 
 		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", i);
 
@@ -4137,8 +4140,7 @@ static void __perform_reads(unsigned long n_reads) {
         {
             HeapTuple tuple = tuptable->vals[i];
             Datum id_datatum;
-			Datum key_str_datum;
-            bool isnull_key, isnull_key_str;
+            bool isnull_key;
             volatile int32 id_value;
 			volatile char * key_str_value;
 
@@ -4156,6 +4158,8 @@ static void __perform_reads(unsigned long n_reads) {
 			// if (!isnull_key && key_str_value) {
 			// 	printf("iteration %d key %d key_str_value: %s\n", j, id_value, key_str_value);
 			// }
+			UNUSED(id_value);
+			UNUSED(key_str_value);
 		}
 
 		SPI_freetuptable(tuptable);
@@ -4464,11 +4468,17 @@ PostgresMain(int argc, char *argv[],
 	printf("main thread begin\n");
 
 	if (perform_insertions)
+	{
 		PerformInsertions();
+		proc_exit(0);
+	}
 	
 	if (perform_reads)
+	{
 		PerformReads(n_loading_read);
-	
+		proc_exit(0);
+	}
+
 	/*
 	 * POSTGRES main processing loop begins here
 	 *
