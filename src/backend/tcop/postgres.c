@@ -4105,6 +4105,8 @@ static void PerformInsertions()
 
 #define UNUSED(x) (void)(x)
 
+#define READ_REPORT_GRAN 1000
+
 static void __perform_reads(unsigned long n_reads) {
 	int ret;
     SPITupleTable *tuptable;
@@ -4116,12 +4118,11 @@ static void __perform_reads(unsigned long n_reads) {
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
 		size_t i = (size_t)rand() % (key_max);
 
-		if ((j % (1000)) == 0) {
-			printf("Read %ld M / %ld M\n", j / 1000, n_reads / 1000);
+		if ((j % (READ_REPORT_GRAN)) == 0) {
+			printf("Read (%ld * %d) / (%ld * %d)\n", 
+				j / READ_REPORT_GRAN, READ_REPORT_GRAN, n_reads / READ_REPORT_GRAN, READ_REPORT_GRAN);
 			fflush(stdout);
 		}
-
-		
 
 		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", i);
 
