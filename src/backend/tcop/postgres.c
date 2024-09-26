@@ -4189,9 +4189,11 @@ static void PerformReads(unsigned long n_reads_loading)
     /* Push the active snapshot */
     PushActiveSnapshot(snapshot);
 
+	srand(0xdeadbeef);
 	/* loading phase */
 	__perform_reads(n_reads_loading);
 
+	 srand(0x20240926);
 	__asm__ volatile ("xchgq %r10, %r10");
 
 	/* running phase */
