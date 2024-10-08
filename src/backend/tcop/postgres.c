@@ -23,8 +23,11 @@
 #include <limits.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <assert.h>
+
 #ifdef HAVE_SYS_SELECT_H
 #include <sys/select.h>
 #endif
@@ -222,6 +225,9 @@ static unsigned long key_max = 15000000UL;
 static unsigned long n_loading_read = 15000000UL;
 static bool perform_insertions = false;
 static bool perform_reads = false;
+
+static int perf_ctl_fd = -1;
+static int perf_ack_fd = -1;
 
 /* ----------------------------------------------------------------
  *		routines to obtain user input
@@ -3750,6 +3756,14 @@ get_stats_option_name(const char *arg)
 	return NULL;
 }
 
+static int get_fifo_fd(const char * fifo_name, int flags) {
+	int fd = open(fifo_name, flags);
+	if (fd == -1) {
+		perror("open");
+		exit(EXIT_FAILURE);
+	}
+	return fd;
+}
 
 /* ----------------------------------------------------------------
  * process_postgres_switches
@@ -3810,7 +3824,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:A:L:")) != -1)
 	{
 		switch (flag)
 		{
@@ -3949,6 +3963,15 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				perform_reads = true;
 				n_loading_read = atoi(optarg);
 				break;
+
+			case 'L':
+				perf_ctl_fd = get_fifo_fd(optarg, O_WRONLY);
+				break;
+			
+			case 'A':
+				perf_ack_fd = get_fifo_fd(optarg, O_RDONLY);
+				break;
+
 			case 'c':
 			case '-':
 				{
@@ -4167,6 +4190,42 @@ static void __perform_reads(unsigned long n_reads) {
 	}
 }
 
+static void enable_perf()
+{
+	char ack[5];
+	#define SYS_show_pgtable 600
+	long res = syscall(SYS_show_pgtable);
+	printf("System call returned %ld\n", res);
+	if (perf_ctl_fd != -1) {
+		ssize_t bytes_written = write(perf_ctl_fd, "enable\n", 8);
+		assert(bytes_written == 8);
+	}
+
+	if (perf_ack_fd != -1) {
+		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+	}
+	__asm__ volatile ("xchgq %r10, %r10");
+}
+
+static void disable_perf()
+{
+	char ack[5];
+	long res = 0;
+	__asm__ volatile ("xchgq %r11, %r11");
+	#define SYS_show_pgtable 600
+	res = syscall(SYS_show_pgtable);
+	printf("System call returned %ld\n", res);
+	if (perf_ctl_fd != -1) {
+		ssize_t bytes_written = write(perf_ctl_fd, "disable\n", 9);
+		assert(bytes_written == 9);
+	}
+
+	if (perf_ack_fd != -1) {
+		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+	}
+}
 
 static void PerformReads(unsigned long n_reads_loading)
 {
@@ -4193,12 +4252,14 @@ static void PerformReads(unsigned long n_reads_loading)
 	/* loading phase */
 	__perform_reads(n_reads_loading);
 
-	 srand(0x20240926);
-	__asm__ volatile ("xchgq %r10, %r10");
+	srand(0x20240926);
+	enable_perf(perf_ctl_fd, perf_ack_fd);
+	// __asm__ volatile ("xchgq %r10, %r10");
 
 	/* running phase */
 	__perform_reads(n_reads_loading / 6);
-	__asm__ volatile ("xchgq %r11, %r11");
+	disable_perf(perf_ctl_fd, perf_ack_fd);
+	// __asm__ volatile ("xchgq %r11, %r11");
     
 
     /* Pop the active snapshot */
