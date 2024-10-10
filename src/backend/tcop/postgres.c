@@ -220,7 +220,7 @@ static void disable_statement_timeout(void);
  *	for standalone application only
  * */
 
-static unsigned long key_max = 15000000UL;
+static unsigned long key_max = 40000000UL;
 // static int running_insertion_ratio = 0;
 static unsigned long n_loading_read = 15000000UL;
 static bool perform_insertions = false;
