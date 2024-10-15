@@ -4134,6 +4134,9 @@ static void __perform_reads(unsigned long n_reads) {
 	int ret;
     SPITupleTable *tuptable;
     TupleDesc tupdesc;
+	
+	struct timeval tstart, tend;
+	gettimeofday(&tstart, NULL);
 
 	for (unsigned long j = 0; j < n_reads; j++)
     {
@@ -4188,6 +4191,13 @@ static void __perform_reads(unsigned long n_reads) {
 
 		SPI_freetuptable(tuptable);
 	}
+
+	gettimeofday(&tend, NULL);
+	int64_t elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
+	printf("Running phase took: %zu.%03zu seconds\n", elapsed / 1000000, (elapsed % 1000000) / 1000);
+	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
+        (double)elapsed / n_reads, n_reads / ((double)elapsed / 1000000));
+
 }
 
 static void enable_perf()
@@ -4230,6 +4240,8 @@ static void disable_perf()
 static void PerformReads(unsigned long n_reads_loading)
 {
     Snapshot snapshot;
+	struct timeval tstart, tend;
+	int64_t elapsed = 0; 
 
     /* Begin transaction */
     StartTransactionCommand();
@@ -4250,16 +4262,35 @@ static void PerformReads(unsigned long n_reads_loading)
 
 	srand(0xdeadbeef);
 	/* loading phase */
+
+	
+	gettimeofday(&tstart, NULL);
+	
 	__perform_reads(n_reads_loading);
 
+	gettimeofday(&tend, NULL);
+	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
+	printf("Running phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading, elapsed / 1000000, (elapsed % 1000000) / 1000);
+	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
+        (double)elapsed / n_reads_loading, n_reads_loading / ((double)elapsed / 1000000));
+
+
 	srand(0x20240926);
+
+
+	gettimeofday(&tstart, NULL);
 	enable_perf(perf_ctl_fd, perf_ack_fd);
-	// __asm__ volatile ("xchgq %r10, %r10");
 
 	/* running phase */
 	__perform_reads(n_reads_loading / 6);
+	
+	
 	disable_perf(perf_ctl_fd, perf_ack_fd);
-	// __asm__ volatile ("xchgq %r11, %r11");
+	gettimeofday(&tend, NULL);
+	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
+	printf("Running phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading / 6, elapsed / 1000000, (elapsed % 1000000) / 1000);
+	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
+        (double)elapsed / (n_reads_loading / 6), (n_reads_loading / 6) / ((double)elapsed / 1000000));
     
 
     /* Pop the active snapshot */
