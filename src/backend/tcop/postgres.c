@@ -4261,8 +4261,8 @@ static void PerformReads(unsigned long n_reads_loading)
 
 	gettimeofday(&tend, NULL);
 	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
-	printf("Running phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading, elapsed / 1000000, (elapsed % 1000000) / 1000);
-	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
+	printf("Loading phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading, elapsed / 1000000, (elapsed % 1000000) / 1000);
+	printf("Loading phase average latency %.03f us, throughput %.03f ops/sec\n", 
         (double)elapsed / n_reads_loading, n_reads_loading / ((double)elapsed / 1000000));
 
 
