@@ -4134,9 +4134,6 @@ static void __perform_reads(unsigned long n_reads) {
 	int ret;
     SPITupleTable *tuptable;
     TupleDesc tupdesc;
-	
-	struct timeval tstart, tend;
-	gettimeofday(&tstart, NULL);
 
 	for (unsigned long j = 0; j < n_reads; j++)
     {
@@ -4191,12 +4188,6 @@ static void __perform_reads(unsigned long n_reads) {
 
 		SPI_freetuptable(tuptable);
 	}
-
-	gettimeofday(&tend, NULL);
-	int64_t elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
-	printf("Running phase took: %zu.%03zu seconds\n", elapsed / 1000000, (elapsed % 1000000) / 1000);
-	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
-        (double)elapsed / n_reads, n_reads / ((double)elapsed / 1000000));
 
 }
 
