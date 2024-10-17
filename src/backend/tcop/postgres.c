@@ -229,6 +229,11 @@ static bool perform_reads = false;
 static int perf_ctl_fd = -1;
 static int perf_ack_fd = -1;
 
+/* Record specified stage */
+#define RECORD_RUNNING 1
+#define RECORD_LOADING 2
+static int record_stage = 1; 
+
 /* ----------------------------------------------------------------
  *		routines to obtain user input
  * ----------------------------------------------------------------
@@ -3824,7 +3829,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:A:L:")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:A:L:a")) != -1)
 	{
 		switch (flag)
 		{
@@ -3971,6 +3976,10 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 			case 'A':
 				perf_ack_fd = get_fifo_fd(optarg, O_RDONLY);
 				break;
+			
+			case 'a':
+				record_stage = RECORD_LOADING; 
+				break; 
 
 			case 'c':
 			case '-':
@@ -4251,13 +4260,19 @@ static void PerformReads(unsigned long n_reads_loading)
     /* Push the active snapshot */
     PushActiveSnapshot(snapshot);
 
-	srand(0xdeadbeef);
 	/* loading phase */
-
-	
+	srand(0xdeadbeef);
 	gettimeofday(&tstart, NULL);
 	
+	if(record_stage & RECORD_LOADING) {
+		enable_perf(perf_ctl_fd, perf_ack_fd);
+	}
+
 	__perform_reads(n_reads_loading);
+
+	if(record_stage & RECORD_LOADING) {
+		disable_perf(perf_ctl_fd, perf_ack_fd);
+	}
 
 	gettimeofday(&tend, NULL);
 	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
@@ -4265,18 +4280,20 @@ static void PerformReads(unsigned long n_reads_loading)
 	printf("Loading phase average latency %.03f us, throughput %.03f ops/sec\n", 
         (double)elapsed / n_reads_loading, n_reads_loading / ((double)elapsed / 1000000));
 
-
-	srand(0x20240926);
-
-
-	gettimeofday(&tstart, NULL);
-	enable_perf(perf_ctl_fd, perf_ack_fd);
-
 	/* running phase */
+	srand(0x20240926);
+	gettimeofday(&tstart, NULL);
+
+	if(record_stage & RECORD_RUNNING) {
+		enable_perf(perf_ctl_fd, perf_ack_fd);
+	}
+
 	__perform_reads(n_reads_loading / 6);
 	
-	
-	disable_perf(perf_ctl_fd, perf_ack_fd);
+	if(record_stage & RECORD_RUNNING) {
+		disable_perf(perf_ctl_fd, perf_ack_fd);
+	}
+
 	gettimeofday(&tend, NULL);
 	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
 	printf("Running phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading / 6, elapsed / 1000000, (elapsed % 1000000) / 1000);
