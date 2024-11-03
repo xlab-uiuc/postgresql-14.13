@@ -3829,7 +3829,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:IR:A:L:a")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:I:R:A:L:a")) != -1)
 	{
 		switch (flag)
 		{
@@ -3963,6 +3963,8 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 
 			case 'I':
 				perform_insertions = true;
+				key_max = atoi(optarg);
+				printf("Performing insertions key_max =%lu\n", key_max);
 				break;
 			case 'R':
 				perform_reads = true;
@@ -4139,7 +4141,7 @@ static void PerformInsertions()
 
 #define READ_REPORT_GRAN 1000
 
-static void __perform_reads(unsigned long n_reads) {
+static void __random_reads(unsigned long n_reads, unsigned long max_to_read) {
 	int ret;
     SPITupleTable *tuptable;
     TupleDesc tupdesc;
@@ -4148,7 +4150,7 @@ static void __perform_reads(unsigned long n_reads) {
     {
 		
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
-		size_t i = (size_t)rand() % (key_max);
+		size_t i = (size_t)rand() % (max_to_read);
 
 		if ((j % (READ_REPORT_GRAN)) == 0) {
 			printf("Read (%ld * %d) / (%ld * %d)\n", 
@@ -4199,6 +4201,71 @@ static void __perform_reads(unsigned long n_reads) {
 	}
 
 }
+
+static void __read_until(unsigned long max_to_read) {
+	int ret;
+    SPITupleTable *tuptable;
+    TupleDesc tupdesc;
+
+	max_to_read = max_to_read > key_max ? key_max : max_to_read;
+
+	for (unsigned long j = 0; j < max_to_read; j++)
+    {
+		
+		char select_cmd[SELECT_COMMAND_MAX_SIZE];
+		// size_t i = (size_t)rand() % (key_max);
+		// size_t i = j;
+
+		if ((j % (READ_REPORT_GRAN)) == 0) {
+			printf("Read (%ld * %d) / (%ld * %d)\n", 
+				j / READ_REPORT_GRAN, READ_REPORT_GRAN, max_to_read / READ_REPORT_GRAN, READ_REPORT_GRAN);
+			fflush(stdout);
+		}
+
+		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", j);
+
+		// printf("select_cmd=%s\n", select_cmd);
+        ret = SPI_execute(select_cmd, true, 0);
+        if (ret != SPI_OK_SELECT)
+        {
+            elog(ERROR, "Select failed on iteration %ld: %d", j, ret);
+        }
+
+        tuptable = SPI_tuptable;
+        tupdesc = tuptable->tupdesc;
+
+        /* Process each row */
+        for (uint64 i = 0; i < SPI_processed; i++)
+        {
+            HeapTuple tuple = tuptable->vals[i];
+            Datum id_datatum;
+            bool isnull_key;
+            volatile int32 id_value;
+			volatile char * key_str_value;
+
+            id_datatum = SPI_getbinval(tuple, tupdesc, 1, &isnull_key);
+            if (!isnull_key)
+            {
+				// printf("id_datatum: %lx\n", id_datatum);
+                id_value = DatumGetInt32(id_datatum);
+                /* Process id_value if needed */
+            }
+
+			key_str_value = SPI_getvalue(tuple, tupdesc, 2);
+			// printf("key_str_value: %p\n", key_str_value);
+
+			// if (!isnull_key && key_str_value) {
+			// 	printf("iteration %d key %d key_str_value: %s\n", j, id_value, key_str_value);
+			// }
+			UNUSED(id_value);
+			UNUSED(key_str_value);
+		}
+
+		SPI_freetuptable(tuptable);
+	}
+
+}
+
 
 static void enable_perf()
 {
@@ -4268,7 +4335,7 @@ static void PerformReads(unsigned long n_reads_loading)
 		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
-	__perform_reads(n_reads_loading);
+	__read_until(n_reads_loading);
 
 	if(record_stage & RECORD_LOADING) {
 		disable_perf(perf_ctl_fd, perf_ack_fd);
@@ -4284,11 +4351,13 @@ static void PerformReads(unsigned long n_reads_loading)
 	srand(0x20240926);
 	gettimeofday(&tstart, NULL);
 
+	// while(1);
+	
 	if(record_stage & RECORD_RUNNING) {
 		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
-	__perform_reads(n_reads_loading / 6);
+	__random_reads(1000000, n_reads_loading);
 	
 	if(record_stage & RECORD_RUNNING) {
 		disable_perf(perf_ctl_fd, perf_ack_fd);
