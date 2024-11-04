@@ -4309,6 +4309,8 @@ static void PerformReads(unsigned long n_reads_loading)
     Snapshot snapshot;
 	struct timeval tstart, tend;
 	int64_t elapsed = 0; 
+	uint64 running_n_ops = 80000000;
+
 
     /* Begin transaction */
     StartTransactionCommand();
@@ -4357,7 +4359,7 @@ static void PerformReads(unsigned long n_reads_loading)
 		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
-	__random_reads(1000000, n_reads_loading);
+	__random_reads(running_n_ops, n_reads_loading);
 	
 	if(record_stage & RECORD_RUNNING) {
 		disable_perf(perf_ctl_fd, perf_ack_fd);
@@ -4365,9 +4367,9 @@ static void PerformReads(unsigned long n_reads_loading)
 
 	gettimeofday(&tend, NULL);
 	elapsed = (tend.tv_sec - tstart.tv_sec) * 1000000 + tend.tv_usec - tstart.tv_usec;
-	printf("Running phase %ld operations took: %zu.%03zu seconds\n", n_reads_loading / 6, elapsed / 1000000, (elapsed % 1000000) / 1000);
+	printf("Running phase %ld operations took: %zu.%03zu seconds\n", running_n_ops / 6, elapsed / 1000000, (elapsed % 1000000) / 1000);
 	printf("Running phase average latency %.03f us, throughput %.03f ops/sec\n", 
-        (double)elapsed / (n_reads_loading / 6), (n_reads_loading / 6) / ((double)elapsed / 1000000));
+        (double)elapsed / (running_n_ops / 6), (running_n_ops / 6) / ((double)elapsed / 1000000));
     
 
     /* Pop the active snapshot */
