@@ -232,6 +232,7 @@ static int perf_ack_fd = -1;
 /* Record specified stage */
 #define RECORD_RUNNING 1
 #define RECORD_LOADING 2
+#define RECORD_LOADING_END 3
 static int record_stage = 1; 
 
 /* ----------------------------------------------------------------
@@ -3829,7 +3830,7 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 	 * postmaster/postmaster.c (the option sets should not conflict) and with
 	 * the common help() function in main/main.c.
 	 */
-	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:I:R:A:L:a")) != -1)
+	while ((flag = getopt(argc, argv, "B:bc:C:D:d:EeFf:h:ijk:lN:nOPp:r:S:sTt:v:W:-:I:R:A:L:a:")) != -1)
 	{
 		switch (flag)
 		{
@@ -3980,7 +3981,8 @@ process_postgres_switches(int argc, char *argv[], GucContext ctx,
 				break;
 			
 			case 'a':
-				record_stage = RECORD_LOADING; 
+				record_stage = atoi(optarg); 
+				printf("Record Stage: %d\n", record_stage);
 				break; 
 
 			case 'c':
@@ -4202,6 +4204,43 @@ static void __random_reads(unsigned long n_reads, unsigned long max_to_read) {
 
 }
 
+static void enable_perf()
+{
+	char ack[5];
+	#define SYS_show_pgtable 600
+	long res = syscall(SYS_show_pgtable);
+	printf("System call returned %ld\n", res);
+	if (perf_ctl_fd != -1) {
+		ssize_t bytes_written = write(perf_ctl_fd, "enable\n", 8);
+		assert(bytes_written == 8);
+	}
+
+	if (perf_ack_fd != -1) {
+		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+	}
+	__asm__ volatile ("xchgq %r10, %r10");
+}
+
+static void disable_perf()
+{
+	char ack[5];
+	long res = 0;
+	__asm__ volatile ("xchgq %r11, %r11");
+	#define SYS_show_pgtable 600
+	res = syscall(SYS_show_pgtable);
+	printf("System call returned %ld\n", res);
+	if (perf_ctl_fd != -1) {
+		ssize_t bytes_written = write(perf_ctl_fd, "disable\n", 9);
+		assert(bytes_written == 9);
+	}
+
+	if (perf_ack_fd != -1) {
+		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
+		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
+	}
+}
+
 static void __read_until(unsigned long max_to_read) {
 	int ret;
     SPITupleTable *tuptable;
@@ -4209,7 +4248,7 @@ static void __read_until(unsigned long max_to_read) {
 
 	max_to_read = max_to_read > key_max ? key_max : max_to_read;
 
-	for (unsigned long j = 0; j < max_to_read; j++)
+	for (unsigned long j = 0; j < (19 * (max_to_read/20)); j++)
     {
 		
 		char select_cmd[SELECT_COMMAND_MAX_SIZE];
@@ -4264,44 +4303,67 @@ static void __read_until(unsigned long max_to_read) {
 		SPI_freetuptable(tuptable);
 	}
 
-}
-
-
-static void enable_perf()
-{
-	char ack[5];
-	#define SYS_show_pgtable 600
-	long res = syscall(SYS_show_pgtable);
-	printf("System call returned %ld\n", res);
-	if (perf_ctl_fd != -1) {
-		ssize_t bytes_written = write(perf_ctl_fd, "enable\n", 8);
-		assert(bytes_written == 8);
+	// enable 
+	if(record_stage == RECORD_LOADING_END) {
+		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
-	if (perf_ack_fd != -1) {
-		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
-		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
-	}
-	__asm__ volatile ("xchgq %r10, %r10");
-}
+	for (unsigned long j = (19 * (max_to_read/20)); j < max_to_read; j++)
+    {
+		
+		char select_cmd[SELECT_COMMAND_MAX_SIZE];
+		// size_t i = (size_t)rand() % (key_max);
+		// size_t i = j;
 
-static void disable_perf()
-{
-	char ack[5];
-	long res = 0;
-	__asm__ volatile ("xchgq %r11, %r11");
-	#define SYS_show_pgtable 600
-	res = syscall(SYS_show_pgtable);
-	printf("System call returned %ld\n", res);
-	if (perf_ctl_fd != -1) {
-		ssize_t bytes_written = write(perf_ctl_fd, "disable\n", 9);
-		assert(bytes_written == 9);
+		if ((j % (READ_REPORT_GRAN)) == 0) {
+			printf("Read (%ld * %d) / (%ld * %d)\n", 
+				j / READ_REPORT_GRAN, READ_REPORT_GRAN, max_to_read / READ_REPORT_GRAN, READ_REPORT_GRAN);
+			fflush(stdout);
+		}
+
+		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", j);
+
+		// printf("select_cmd=%s\n", select_cmd);
+        ret = SPI_execute(select_cmd, true, 0);
+        if (ret != SPI_OK_SELECT)
+        {
+            elog(ERROR, "Select failed on iteration %ld: %d", j, ret);
+        }
+
+        tuptable = SPI_tuptable;
+        tupdesc = tuptable->tupdesc;
+
+        /* Process each row */
+        for (uint64 i = 0; i < SPI_processed; i++)
+        {
+            HeapTuple tuple = tuptable->vals[i];
+            Datum id_datatum;
+            bool isnull_key;
+            volatile int32 id_value;
+			volatile char * key_str_value;
+
+            id_datatum = SPI_getbinval(tuple, tupdesc, 1, &isnull_key);
+            if (!isnull_key)
+            {
+				// printf("id_datatum: %lx\n", id_datatum);
+                id_value = DatumGetInt32(id_datatum);
+                /* Process id_value if needed */
+            }
+
+			key_str_value = SPI_getvalue(tuple, tupdesc, 2);
+			// printf("key_str_value: %p\n", key_str_value);
+
+			// if (!isnull_key && key_str_value) {
+			// 	printf("iteration %d key %d key_str_value: %s\n", j, id_value, key_str_value);
+			// }
+			UNUSED(id_value);
+			UNUSED(key_str_value);
+		}
+
+		SPI_freetuptable(tuptable);
 	}
 
-	if (perf_ack_fd != -1) {
-		ssize_t bytes_read = read(perf_ack_fd, ack, 5);
-		assert(bytes_read == 5 && strcmp(ack, "ack\n") == 0);
-	}
+
 }
 
 static void PerformReads(unsigned long n_reads_loading)
@@ -4333,13 +4395,13 @@ static void PerformReads(unsigned long n_reads_loading)
 	srand(0xdeadbeef);
 	gettimeofday(&tstart, NULL);
 	
-	if(record_stage & RECORD_LOADING) {
+	if(record_stage == RECORD_LOADING) {
 		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
 	__read_until(n_reads_loading);
 
-	if(record_stage & RECORD_LOADING) {
+	if(record_stage == RECORD_LOADING || record_stage == RECORD_LOADING_END) {
 		disable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
@@ -4355,13 +4417,13 @@ static void PerformReads(unsigned long n_reads_loading)
 
 	// while(1);
 	
-	if(record_stage & RECORD_RUNNING) {
+	if(record_stage == RECORD_RUNNING) {
 		enable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
 	__random_reads(running_n_ops, n_reads_loading);
 	
-	if(record_stage & RECORD_RUNNING) {
+	if(record_stage == RECORD_RUNNING) {
 		disable_perf(perf_ctl_fd, perf_ack_fd);
 	}
 
