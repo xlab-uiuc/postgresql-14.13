@@ -22,6 +22,7 @@
 #include <fcntl.h>
 #include <limits.h>
 #include <signal.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -4143,10 +4144,83 @@ static void PerformInsertions()
 
 #define READ_REPORT_GRAN 1000
 
+#define MAX_LATENCY 100000 // Maximum latency expected in nanoseconds (1ms)
+#define BUCKET_SIZE 1 // Bucket size in nano
+#define N_BUCKET (MAX_LATENCY / BUCKET_SIZE)
+
+static int64_t get_elapsed_time(struct timespec *start, struct timespec *end) {
+    return (end->tv_sec - start->tv_sec) * 1000000000 + (end->tv_nsec - start->tv_nsec);
+}
+
+static void fill_bucket(int64_t elaspsed_time, int64_t * buckets)
+{
+    size_t bucket_index = (elaspsed_time < MAX_LATENCY) ? (elaspsed_time / BUCKET_SIZE) : (N_BUCKET - 1);
+    buckets[bucket_index]++;
+}
+
+static int64_t get_tail_latency(int64_t * buckets, uint64_t n_ops ,float percentile) {
+    size_t i = 0;
+    size_t total = 0;
+    size_t tail = n_ops * percentile;
+    // printf("n_ops %lu, percentile=%f tail %lu\n", 
+    //     n_ops, percentile, tail);
+    while (i < N_BUCKET && total < tail) {
+        total += buckets[i];
+        i++;
+    }
+    return i * BUCKET_SIZE;
+}
+
+static int64_t get_p90(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.90);
+}
+
+static int64_t get_p95(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.95);
+}
+
+static int64_t get_p99(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.99);
+}
+
+static int64_t get_p999(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.999);
+}
+
+static int64_t get_p9999(int64_t * buckets, uint64_t n_ops) {
+    return get_tail_latency(buckets, n_ops, 0.9999);
+}
+
+static int64_t get_total_time(int64_t * buckets) {
+    int64_t total = 0;
+    for (int64_t i = 0; i < N_BUCKET; i++) {
+        total += buckets[i] * i * BUCKET_SIZE;
+    }
+    return total;
+}
+static double get_average(int64_t * buckets, uint64_t n_ops) {
+    int64_t total = get_total_time(buckets);
+    return (double) total / n_ops;
+}
+
+static double get_throughput(int64_t * buckets, uint64_t n_ops) {
+    int64_t total = get_total_time(buckets);
+    return ((double) n_ops / total) * 1000000000;
+}
+
+
 static void __random_reads(unsigned long n_reads, unsigned long max_to_read) {
 	int ret;
     SPITupleTable *tuptable;
     TupleDesc tupdesc;
+
+	struct timespec read_each_tstart, read_each_tend; 
+    int64_t elapsed_read_each;
+
+	int64_t * read_latencies_buckets = (int64_t *) malloc(N_BUCKET * sizeof(int64_t));
+	memset(read_latencies_buckets, 0, N_BUCKET * sizeof(int64_t));
+
+	
 
 	for (unsigned long j = 0; j < n_reads; j++)
     {
@@ -4162,6 +4236,7 @@ static void __random_reads(unsigned long n_reads, unsigned long max_to_read) {
 
 		snprintf(select_cmd, SELECT_COMMAND_MAX_SIZE, "SELECT * FROM test_table WHERE id = %ld;", i);
 
+		clock_gettime(CLOCK_REALTIME, &read_each_tstart);
 		// printf("select_cmd=%s\n", select_cmd);
         ret = SPI_execute(select_cmd, true, 0);
         if (ret != SPI_OK_SELECT)
@@ -4200,8 +4275,23 @@ static void __random_reads(unsigned long n_reads, unsigned long max_to_read) {
 		}
 
 		SPI_freetuptable(tuptable);
+
+		clock_gettime(CLOCK_REALTIME, &read_each_tend);
+		elapsed_read_each = get_elapsed_time(&read_each_tstart, &read_each_tend);
+		fill_bucket(elapsed_read_each, read_latencies_buckets);
 	}
 
+	fprintf(stderr, "[READ] precise time: %ld ns\n", get_total_time(read_latencies_buckets));
+    fprintf(stderr, "[READ] precise throughput: %.03f ops/sec\n", get_throughput(read_latencies_buckets, n_reads));
+    fprintf(stderr, "[READ] precise average latency %.03f ns\n", get_average(read_latencies_buckets, n_reads));
+    
+    fprintf(stderr, "[READ] precise p90 %ld p95 %ld p99 %ld p999 %ld ns\n",
+        get_p90(read_latencies_buckets, n_reads),
+        get_p95(read_latencies_buckets, n_reads),
+        get_p99(read_latencies_buckets, n_reads),
+        get_p999(read_latencies_buckets, n_reads));
+
+	free(read_latencies_buckets);
 }
 
 static void enable_perf()
